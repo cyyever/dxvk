@@ -148,7 +148,6 @@ namespace dxvk {
     VkDeviceSize      memoryBudget  = 0u;
     VkMemoryHeap      properties    = { };
     bool              enforceBudget = false;
-    bool              enableEviction = false;
   };
 
 
@@ -248,6 +247,29 @@ namespace dxvk {
         info.queueFamilyIndexCount = queueFamilies.size();
         info.pQueueFamilyIndices = queueFamilies.data();
       }
+    }
+
+    template<typename CreateInfo>
+    bool writeBack(CreateInfo& info) const {
+      info.sharingMode = sharingMode();
+
+      if (info.sharingMode == VK_SHARING_MODE_CONCURRENT) {
+        if (info.pQueueFamilyIndices) {
+          info.queueFamilyIndexCount = std::min<uint32_t>(queueFamilies.size(), info.queueFamilyIndexCount);
+
+          for (uint32_t i = 0u; i < info.queueFamilyIndexCount; i++)
+            const_cast<uint32_t&>(info.pQueueFamilyIndices[i]) = queueFamilies.at(i);
+
+          if (info.queueFamilyIndexCount < queueFamilies.size())
+            return false;
+        } else {
+          info.queueFamilyIndexCount = queueFamilies.size();
+        }
+      } else {
+        info.queueFamilyIndexCount = 0u;
+      }
+
+      return true;
     }
   };
 
@@ -527,7 +549,7 @@ namespace dxvk {
      * \brief Increments reference count
      */
     force_inline void incRef() {
-      m_useCount.fetch_add(1u, std::memory_order_acquire);
+      m_useCount.fetch_add(1u);
     }
 
     /**
@@ -535,7 +557,7 @@ namespace dxvk {
      * Frees allocation if necessary
      */
     force_inline void decRef() {
-      if (unlikely(m_useCount.fetch_sub(1u, std::memory_order_acquire) == 1u))
+      if (unlikely(m_useCount.fetch_sub(1u) == 1u))
         free();
     }
 
@@ -1109,6 +1131,8 @@ namespace dxvk {
       DxvkRelocationEntry,
       RelocationOrdering>       m_entries;
 
+    DxvkResourceMemoryInfo      m_lastKey = {};
+
   };
 
 
@@ -1435,6 +1459,11 @@ namespace dxvk {
     uint32_t countEmptyChunksInPool(
       const DxvkMemoryPool&       pool) const;
 
+    void freeEmptyChunksForType(
+            DxvkMemoryType&       type,
+            VkDeviceSize          allocationSize,
+            high_resolution_clock::time_point time);
+
     void freeEmptyChunksInHeap(
       const DxvkMemoryHeap&       heap,
             VkDeviceSize          allocationSize,
@@ -1467,7 +1496,7 @@ namespace dxvk {
       const DxvkDeviceMemory&     memory,
       const DxvkAllocationInfo&   allocationInfo);
 
-    DxvkResourceAllocation* createAllocation(
+    DxvkResourceAllocation* allocateSparsePageTable(
             DxvkSparsePageTable*  sparsePageTable,
       const DxvkAllocationInfo&   allocationInfo);
 

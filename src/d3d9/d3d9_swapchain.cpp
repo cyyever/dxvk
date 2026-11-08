@@ -84,7 +84,8 @@ namespace dxvk {
 
     if (riid == __uuidof(IUnknown)
      || riid == __uuidof(IDirect3DSwapChain9)
-     || (GetParent()->IsExtended() && riid == __uuidof(IDirect3DSwapChain9Ex))) {
+     || (m_parent->IsD3DCompatibile(D3DCompatibility::D3D9Ex) &&
+         riid == __uuidof(IDirect3DSwapChain9Ex))) {
       *ppvObject = ref(this);
       return S_OK;
     }
@@ -280,7 +281,7 @@ namespace dxvk {
                        || dstTexExtent.width > srcTexExtent.width
                        || dstTexExtent.height > srcTexExtent.height;
 
-    dstTexInfo->CreateBuffer(clearDst, dstTexInfo->GetTotalSize());
+    dstTexInfo->EnsureBufferExists(clearDst);
     DxvkBufferSlice dstBufferSlice = dstTexInfo->GetBufferSlice(dst->GetSubresource());
     Rc<DxvkImage>   srcImage       = srcTexInfo->GetImage();
 
@@ -342,7 +343,7 @@ namespace dxvk {
     if (!similar || srcImage->info().extent != dstTexInfo->GetExtent()) {
       DxvkImageCreateInfo blitCreateInfo;
       blitCreateInfo.type          = VK_IMAGE_TYPE_2D;
-      blitCreateInfo.format        = dstTexInfo->GetFormatMapping().FormatColor;
+      blitCreateInfo.format        = dstTexInfo->GetFormatMapping().Format;
       blitCreateInfo.flags         = 0;
       blitCreateInfo.sampleCount   = VK_SAMPLE_COUNT_1_BIT;
       blitCreateInfo.extent        = dstTexInfo->GetExtent();
@@ -627,6 +628,17 @@ namespace dxvk {
 
     bool changeFullscreen = m_presentParams.Windowed != pPresentParams->Windowed;
 
+    if (m_window != pPresentParams->hDeviceWindow) {
+      if (!m_presentParams.Windowed) {
+        this->LeaveFullscreenMode();
+        if (!pPresentParams->Windowed)
+          changeFullscreen = true;
+      }
+
+      m_window = pPresentParams->hDeviceWindow;
+      m_displayRefreshRateDirty = true;
+    }
+
     if (pPresentParams->Windowed) {
       if (changeFullscreen)
         this->LeaveFullscreenMode();
@@ -881,6 +893,7 @@ namespace dxvk {
         cDevice         = m_device,
         cPresenter      = m_wctx->presenter,
         cBlitter        = m_blitter,
+        cHud            = m_hud,
         cColorSpace     = m_colorspace,
         cSrcView        = swapImageView,
         cSrcRect        = srcRect,
@@ -890,6 +903,9 @@ namespace dxvk {
         cFrameId        = m_wctx->frameId,
         cLatency        = m_latencyTracker
       ] (DxvkContext* ctx) {
+        if (cHud)
+          cHud->update(*cPresenter);
+
         // Update back buffer color space as necessary
         if (cSrcView->image()->info().colorSpace != cColorSpace) {
           DxvkImageUsageInfo usage = { };
@@ -901,14 +917,14 @@ namespace dxvk {
         // Blit back buffer onto Vulkan swap chain
         auto contextObjects = ctx->beginExternalRendering();
 
-        cBlitter->present(contextObjects,
+        cBlitter->present(contextObjects, cHud, VkClearColorValue(),
           cDstView, cDstRect, cSrcView, cSrcRect);
 
         // Submit command list and present
         ctx->synchronizeWsi(cSync);
-        ctx->flushCommandList(nullptr, nullptr);
+        ctx->flushCommandList(nullptr, 0u);
 
-        cDevice->presentImage(cPresenter, cLatency, cFrameId, nullptr);
+        cDevice->presentImage(cPresenter, cLatency, cFrameId, 0, nullptr, 0);
       });
 
       m_parent->FlushCsChunk();
@@ -1042,10 +1058,12 @@ namespace dxvk {
     // we might need to lock for the BlitGDI fallback path
     desc.IsLockable         = true;
 
+    const bool isExtended = m_parent->IsD3DCompatibile(D3DCompatibility::D3D9Ex);
+
     for (uint32_t i = 0; i < bufferCount; i++) {
       D3D9Surface* surface;
       try {
-        surface = new D3D9Surface(m_parent, &desc, m_parent->IsExtended(), this, nullptr);
+        surface = new D3D9Surface(m_parent, &desc, isExtended, this, nullptr);
         m_parent->IncrementLosableCounter();
       } catch (const DxvkError& e) {
         DestroyBackBuffers();
@@ -1076,22 +1094,22 @@ namespace dxvk {
 
 
   void D3D9SwapChainEx::CreateBlitter() {
-    Rc<hud::Hud> hud = hud::Hud::createHud(m_device);
+    m_hud = hud::Hud::createHud(m_device);
 
-    if (hud) {
-      m_apiHud = hud->addItem<hud::HudClientApiItem>("api", 1, GetApiName());
+    if (m_hud) {
+      m_apiHud = m_hud->addItem<hud::HudClientApiItem>("api", 1, GetApiName());
 
       if (m_latencyTracking)
-        m_latencyHud = hud->addItem<hud::HudLatencyItem>("latency", 4);
+        m_latencyHud = m_hud->addItem<hud::HudLatencyItem>("latency", 4);
 
-      hud->addItem<hud::HudSWVPState>("swvp", -1, m_parent);
+      m_hud->addItem<hud::HudSWVPState>("swvp", -1, m_parent);
 
-#ifdef D3D9_ALLOW_UNMAPPING
-      hud->addItem<hud::HudTextureMemory>("memory", -1, m_parent);
+#ifdef DXVK_USE_UNMAPPABLE_MEMORY
+      m_hud->addItem<hud::HudTextureMemory>("memory", -1, m_parent);
 #endif
     }
 
-    m_blitter = new DxvkSwapchainBlitter(m_device, std::move(hud));
+    m_blitter = new DxvkSwapchainBlitter(m_device);
   }
 
 
@@ -1331,10 +1349,9 @@ namespace dxvk {
       m_srcRect.left   = 0;
       m_srcRect.right  = m_presentParams.BackBufferWidth;
       m_srcRect.bottom = m_presentParams.BackBufferHeight;
-    }
-    else
+    } else {
       m_srcRect = *pSourceRect;
-
+    }
     
     UINT width, height;
     wsi::getWindowSize(m_window, &width, &height);
@@ -1346,10 +1363,9 @@ namespace dxvk {
       dstRect.left   = 0;
       dstRect.right  = LONG(width);
       dstRect.bottom = LONG(height);
-      
-    }
-    else
+    } else {
       dstRect = *pDestRect;
+    }
 
     m_partialCopy =
        dstRect.left != 0
@@ -1374,11 +1390,11 @@ namespace dxvk {
 
 
   std::string D3D9SwapChainEx::GetApiName() {
-    if (this->GetParent()->Is9On12Device())
-      return this->GetParent()->IsExtended() ? "D3D9On12Ex" : "D3D9On12";
+    if (m_parent->Is9On12Device())
+      return m_parent->IsD3DCompatibile(D3DCompatibility::D3D9Ex) ? "D3D9ExOn12" : "D3D9On12";
 
-    return this->GetParent()->IsD3D8Compatible() ? "D3D8" :
-           this->GetParent()->IsExtended() ? "D3D9Ex" : "D3D9";
+    return m_parent->IsD3DCompatibile(D3DCompatibility::D3D8) ? "D3D8" :
+           m_parent->IsD3DCompatibile(D3DCompatibility::D3D9Ex) ? "D3D9Ex" : "D3D9";
   }
 
 

@@ -80,6 +80,22 @@ namespace dxvk {
     iaInfo.topology               = state.ia.primitiveTopology();
     iaInfo.primitiveRestartEnable = state.ia.primitiveRestart();
 
+    /* KosmicKrisp/Metal cannot disable primitive restart for strip/fan topologies
+       (Metal always treats the max index as a restart). Force it on for those so
+       pipeline creation doesn't fail with VK_ERROR_FEATURE_NOT_PRESENT ->
+       VK_ERROR_DEVICE_LOST. The restart index is unused by D3D, so this is safe. */
+    switch (iaInfo.topology) {
+      case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP:
+      case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP:
+      case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN:
+      case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY:
+      case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP_WITH_ADJACENCY:
+        iaInfo.primitiveRestartEnable = VK_TRUE;
+        break;
+      default:
+        break;
+    }
+
     uint32_t attrMask = shaders.vs->metadata().inputs.computeMask();
     uint32_t bindingMask = 0;
 
@@ -176,7 +192,7 @@ namespace dxvk {
         && a.offset     == b.offset;
     }
 
-    for (uint32_t i = 0; i < viDivisorInfo.vertexBindingDivisorCount; i++) {
+    for (uint32_t i = 0; i < viDivisorInfo.vertexBindingDivisorCount && eq; i++) {
       const auto& a = viDivisors[i];
       const auto& b = other.viDivisors[i];
 
@@ -279,10 +295,6 @@ namespace dxvk {
     // mask for any attachment that the fragment shader does not write to.
     uint32_t fsOutputMask = shaders.fs ? shaders.fs->metadata().outputs.computeMask() : 0u;
 
-    // Dual-source blending can only write to one render target
-    if (state.useDualSourceBlending())
-      fsOutputMask &= 0x1;
-
     const VkColorComponentFlags rgbaWriteMask
       = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
       | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
@@ -292,7 +304,10 @@ namespace dxvk {
 
     feedbackLoop = state.om.feedbackLoop();
 
-    for (uint32_t i = 0; i < MaxNumRenderTargets; i++) {
+    // Dual-source blending can only write to one render target
+    uint32_t rtCount = state.useDualSourceBlending() ? 1u : uint32_t(MaxNumRenderTargets);
+
+    for (uint32_t i = 0; i < rtCount; i++) {
       rtColorFormats[i] = state.rt.getColorFormat(i);
 
       if (rtColorFormats[i]) {
@@ -325,6 +340,19 @@ namespace dxvk {
                 std::exchange(cbAttachments[i].dstAlphaBlendFactor, VK_BLEND_FACTOR_ZERO));
               cbAttachments[i].colorBlendOp =
                 std::exchange(cbAttachments[i].alphaBlendOp, VK_BLEND_OP_ADD);
+            }
+
+            // If we want to use dual-source blending but the the fragment shader does
+            // not export the second output, replace dual blend factos with zero.
+            if (!i && cbAttachments[i].blendEnable && !(fsOutputMask & 0x2u)) {
+              if (util::isDualSourceBlendFactor(cbAttachments[i].srcColorBlendFactor))
+                cbAttachments[i].srcColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+              if (util::isDualSourceBlendFactor(cbAttachments[i].dstColorBlendFactor))
+                cbAttachments[i].dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+              if (util::isDualSourceBlendFactor(cbAttachments[i].srcAlphaBlendFactor))
+                cbAttachments[i].srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+              if (util::isDualSourceBlendFactor(cbAttachments[i].dstAlphaBlendFactor))
+                cbAttachments[i].dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
             }
           }
         }
@@ -1058,6 +1086,9 @@ namespace dxvk {
       if (m_shaders.fs->metadata().flags.test(DxvkShaderFlag::ExportsSampleMask))
         m_flags.set(DxvkGraphicsPipelineFlag::HasSampleMaskExport);
     }
+
+    if (getLastPreRasterStage().metadata().flags.test(DxvkShaderFlag::ExportsLayer))
+      m_flags.set(DxvkGraphicsPipelineFlag::HasLayerExport);
   }
   
   
@@ -1142,11 +1173,11 @@ namespace dxvk {
     // Exit if another thread is already compiling
     // an optimized version of this pipeline
     if (instance->isCompiling.load()
-     || instance->isCompiling.exchange(VK_TRUE, std::memory_order_acquire))
+     || instance->isCompiling.exchange(VK_TRUE))
       return;
 
     VkPipeline pipeline = this->getOptimizedPipeline(state);
-    instance->fastHandle.store(pipeline, std::memory_order_release);
+    instance->fastHandle.store(pipeline);
 
     // Log pipeline state on error
     if (!pipeline)
@@ -1418,7 +1449,7 @@ namespace dxvk {
       auto [status, handle] = createOptimizedPipeline(key);
 
       entry.first->second.pipeline = handle;
-      entry.first->second.status.store(status, std::memory_order_release);
+      entry.first->second.status.store(status);
 
       return handle;
     } else {
@@ -1427,7 +1458,7 @@ namespace dxvk {
       // on multiple threads in parallel, which is problematic on some drivers.
       // This should be quite rare anyway.
       sync::spin(1000u, [&entry] {
-        auto status = entry.first->second.status.load(std::memory_order_acquire);
+        auto status = entry.first->second.status.load();
         return status != VK_NOT_READY;
       });
 
@@ -1442,16 +1473,16 @@ namespace dxvk {
     auto layout = m_layout.getLayout(DxvkPipelineLayoutType::Merged);
 
     DxvkShaderStageInfo stageInfo(m_device, layout);
-    stageInfo.addStage(VK_SHADER_STAGE_VERTEX_BIT, getShaderCode(*m_shaders.vs, key.shState.vsInfo), &key.scState.scInfo);
+    stageInfo.addStage(m_shaders.vs->metadata(), getShaderCode(*m_shaders.vs, key.shState.vsInfo), &key.scState.scInfo);
 
     if (m_shaders.tcs)
-      stageInfo.addStage(VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, getShaderCode(*m_shaders.tcs, key.shState.tcsInfo), &key.scState.scInfo);
+      stageInfo.addStage(m_shaders.tcs->metadata(), getShaderCode(*m_shaders.tcs, key.shState.tcsInfo), &key.scState.scInfo);
     if (m_shaders.tes)
-      stageInfo.addStage(VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, getShaderCode(*m_shaders.tes, key.shState.tesInfo), &key.scState.scInfo);
+      stageInfo.addStage(m_shaders.tes->metadata(), getShaderCode(*m_shaders.tes, key.shState.tesInfo), &key.scState.scInfo);
     if (m_shaders.gs)
-      stageInfo.addStage(VK_SHADER_STAGE_GEOMETRY_BIT, getShaderCode(*m_shaders.gs, key.shState.gsInfo), &key.scState.scInfo);
+      stageInfo.addStage(m_shaders.gs->metadata(), getShaderCode(*m_shaders.gs, key.shState.gsInfo), &key.scState.scInfo);
     if (m_shaders.fs)
-      stageInfo.addStage(VK_SHADER_STAGE_FRAGMENT_BIT, getShaderCode(*m_shaders.fs, key.shState.fsInfo), &key.scState.scInfo);
+      stageInfo.addStage(m_shaders.fs->metadata(), getShaderCode(*m_shaders.fs, key.shState.fsInfo), &key.scState.scInfo);
 
     VkPipelineCreateFlags2CreateInfo flags = { VK_STRUCTURE_TYPE_PIPELINE_CREATE_FLAGS_2_CREATE_INFO };
 
@@ -1505,6 +1536,19 @@ namespace dxvk {
   }
   
   
+  DxvkShader& DxvkGraphicsPipeline::getLastPreRasterStage() {
+    if (m_shaders.gs)
+      return *m_shaders.gs;
+
+    if (m_shaders.tes)
+      return *m_shaders.tes;
+
+    // TCS can't occur alone, so ignore.
+    // VS always exists.
+    return *m_shaders.vs;
+  }
+
+
   void DxvkGraphicsPipeline::destroyBasePipelines() {
     for (const auto& instance : m_basePipelines) {
       this->destroyVulkanPipeline(instance.second);

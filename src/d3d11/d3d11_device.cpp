@@ -53,6 +53,10 @@ namespace dxvk {
     m_shaderOptions     (GetShaderOptions(m_dxvkDevice, m_d3d11Options)),
     m_maxFeatureLevel   (D3D11DeviceFeatures::GetMaxFeatureLevel(*m_dxvkDevice)),
     m_deviceFeatures    (*m_dxvkDevice, m_d3d11Options, m_featureLevel) {
+    // This option might lead to long-running submissions
+    if (m_d3d11Options.reproducibleCommandStream)
+      m_dxvkDevice->setSubmissionTimeout(-1ull);
+
     m_initializer = new D3D11Initializer(this);
     m_context     = new D3D11ImmediateContext(this, m_dxvkDevice);
     m_d3d10Device = new D3D10Device(this, m_context.ptr());
@@ -567,11 +571,6 @@ namespace dxvk {
     D3D11_COMMON_RESOURCE_DESC resourceDesc;
     GetCommonResourceDesc(pResource, &resourceDesc);
     
-    if (resourceDesc.Dim == D3D11_RESOURCE_DIMENSION_BUFFER) {
-      Logger::warn("D3D11: Cannot create render target view for a buffer");
-      return S_OK; // It is required to run Battlefield 3 and Battlefield 4.
-    }
-    
     // The view description is optional. If not defined, it
     // will use the resource's format and all array layers.
     D3D11_RENDER_TARGET_VIEW_DESC1 desc;
@@ -602,7 +601,12 @@ namespace dxvk {
       return S_FALSE;
     
     try {
-      *ppRTView = ref(new D3D11RenderTargetView(this, pResource, &desc));
+      auto rtv = ref(new D3D11RenderTargetView(this, pResource, &desc));
+
+      if (desc.ViewDimension == D3D11_RTV_DIMENSION_BUFFER)
+        m_initializer->InitRtvImage(rtv);
+
+      *ppRTView = rtv;
       return S_OK;
     } catch (const DxvkError& e) {
       Logger::err(e.message());
@@ -1851,7 +1855,7 @@ namespace dxvk {
   
   HRESULT STDMETHODCALLTYPE D3D11Device::SetExceptionMode(UINT RaiseFlags) {
     Logger::err("D3D11Device::SetExceptionMode: Not implemented");
-    return E_NOTIMPL;
+    return S_OK;
   }
   
   
@@ -2061,8 +2065,10 @@ namespace dxvk {
 
     auto [hi, lo] = shaderInfo.getVersion();
 
-    if ((hi > 5u) || (hi == 5u && lo) || (hi == 4u && lo > 1u) || hi < 4u)
-      throw DxvkError(str::format("Invalid shader model: ", hi, "_", lo));
+    if ((hi > 5u) || (hi == 5u && lo) || (hi == 4u && lo > 1u) || hi < 4u) {
+      Logger::err(str::format("Invalid shader model: ", hi, "_", lo));
+      return E_INVALIDARG;
+    }
 
     // Check whether the stage matches or if we can create a pass-through GS
     auto shaderStage = [] (dxbc_spv::dxbc::ShaderType type) {
@@ -2079,7 +2085,7 @@ namespace dxvk {
     } (shaderInfo.getType());
 
     if (ShaderKey.stage() != shaderStage) {
-      bool mismatch = !ShaderKey.hasXfb() || (
+      bool mismatch = ModuleInfo.xfbEntries.empty() || (
         shaderStage != VK_SHADER_STAGE_VERTEX_BIT &&
         shaderStage != VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT);
 
@@ -2706,6 +2712,18 @@ namespace dxvk {
   }
 
 
+  void D3D11Device::LockBuffer(
+    const Rc<DxvkBuffer>&           Buffer) {
+    auto chunk = AllocCsChunk(DxvkCsChunkFlag::SingleUse);
+
+    chunk->push([cBuffer = Buffer] (DxvkContext* ctx) {
+      ctx->ensureBufferAddress(cBuffer);
+    });
+
+    m_context->InjectCsChunk(DxvkCsQueue::HighPriority, std::move(chunk), true);
+  }
+
+
   bool D3D11Device::LockImage(
     const Rc<DxvkImage>&            Image,
           VkImageUsageFlags         Usage) {
@@ -2765,11 +2783,35 @@ namespace dxvk {
        D3D11_COMMON_TEXTURE_DESC* desc) {
 
     if (size == sizeof(d3dkmt.d3d12) && d3dkmt.d3d12.d3d11.dxgi.size == sizeof(d3dkmt.d3d12.d3d11) && d3dkmt.d3d12.d3d11.dxgi.version == 0) {
-      Logger::warn(str::format("D3D11Device::ConvertRuntimeDescriptor: D3D12 descriptor conversion not implemented"));
-      return false;
-    }
+      const D3D12_RESOURCE_DESC1 *d3d12 = &d3dkmt.d3d12.desc1;
+      Logger::debug(str::format("D3D11Device::ConvertRuntimeDescriptor: Found D3D12 desc with dimension: ", d3d12->Dimension));
 
-    if (size >= sizeof(d3dkmt.d3d11) && d3dkmt.dxgi.size == sizeof(d3dkmt.d3d11) && d3dkmt.dxgi.version == 4) {
+      switch (d3d12->Dimension) {
+        case D3D12_RESOURCE_DIMENSION_TEXTURE2D:
+          desc->Width = d3d12->Width;
+          desc->Height = d3d12->Height;
+          desc->Depth = 1;
+          desc->MipLevels = d3d12->MipLevels;
+          desc->ArraySize = d3d12->DepthOrArraySize;
+          desc->Format = d3d12->Format;
+          desc->SampleDesc = d3d12->SampleDesc;
+          desc->Usage = D3D11_USAGE_DEFAULT;
+          desc->BindFlags = D3D11_BIND_RENDER_TARGET;
+          if (d3d12->Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)
+            desc->BindFlags |= D3D11_BIND_DEPTH_STENCIL;
+          if (d3d12->Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
+            desc->BindFlags |= D3D11_BIND_UNORDERED_ACCESS;
+          if (!(d3d12->Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE))
+            desc->BindFlags |= D3D11_BIND_SHADER_RESOURCE;
+          desc->CPUAccessFlags = 0;
+          desc->MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+          desc->TextureLayout = D3D11_TEXTURE_LAYOUT_UNDEFINED;
+          break;
+        default:
+          Logger::warn(str::format("D3D11Device::ConvertRuntimeDescriptor: Unsupported dimension: ", d3d12->Dimension));
+          return false;
+      }
+    } else if (size >= sizeof(d3dkmt.d3d11) && d3dkmt.dxgi.size == sizeof(d3dkmt.d3d11) && d3dkmt.dxgi.version == 4) {
       Logger::debug(str::format("D3D11Device::ConvertRuntimeDescriptor: Found D3D11 desc with dimension: ", d3dkmt.d3d11.dimension));
 
       switch (d3dkmt.d3d11.dimension) {
@@ -2791,42 +2833,9 @@ namespace dxvk {
           Logger::warn(str::format("D3D11Device::ConvertRuntimeDescriptor: Unsupported dimension: ", d3dkmt.d3d11.dimension));
           return false;
       }
-
-      Logger::debug(str::format("D3D11Device::ConvertRuntimeDescriptor: Translated D3D11 desc:"));
-      Logger::debug(str::format("  Width: ", desc->Width));
-      Logger::debug(str::format("  Height: ", desc->Height));
-      Logger::debug(str::format("  Depth: ", desc->Depth));
-      Logger::debug(str::format("  MipLevels: ", desc->MipLevels));
-      Logger::debug(str::format("  ArraySize: ", desc->ArraySize));
-      Logger::debug(str::format("  Format: ", desc->Format));
-      Logger::debug(str::format("  SampleDesc.Count: ", desc->SampleDesc.Count));
-      Logger::debug(str::format("  SampleDesc.Quality: ", desc->SampleDesc.Quality));
-      Logger::debug(str::format("  Usage: ", desc->Usage));
-      Logger::debug(str::format("  BindFlags: ", desc->BindFlags));
-      Logger::debug(str::format("  CPUAccessFlags: ", desc->CPUAccessFlags));
-      Logger::debug(str::format("  MiscFlags: ", desc->MiscFlags));
-      Logger::debug(str::format("  TextureLayout: ", desc->TextureLayout));
-      return true;
     }
-
-    if (size >= sizeof(d3dkmt.d3d9) && d3dkmt.dxgi.size == sizeof(d3dkmt.d3d9) && d3dkmt.dxgi.version == 1) {
+    else if (size >= sizeof(d3dkmt.d3d9) && d3dkmt.dxgi.size == sizeof(d3dkmt.d3d9) && d3dkmt.dxgi.version == 1) {
       Logger::debug(str::format("D3D11Device::ConvertRuntimeDescriptor: Found D3D9 desc: ", d3dkmt.d3d9.type));
-      Logger::debug(str::format("  dxgi.width: ", d3dkmt.d3d9.dxgi.width));
-      Logger::debug(str::format("  dxgi.height: ", d3dkmt.d3d9.dxgi.height));
-      Logger::debug(str::format("  format: ", d3dkmt.d3d9.format));
-      Logger::debug(str::format("  usage: ", d3dkmt.d3d9.usage));
-      if (d3dkmt.d3d9.type == D3DRTYPE_TEXTURE) {
-        Logger::debug(str::format("  texture.width: ", d3dkmt.d3d9.texture.width));
-        Logger::debug(str::format("  texture.height: ", d3dkmt.d3d9.texture.height));
-        Logger::debug(str::format("  texture.depth: ", d3dkmt.d3d9.texture.depth));
-        Logger::debug(str::format("  texture.levels: ", d3dkmt.d3d9.texture.levels));
-      } else if (d3dkmt.d3d9.type == D3DRTYPE_SURFACE) {
-        Logger::debug(str::format("  surface.width: ", d3dkmt.d3d9.surface.width));
-        Logger::debug(str::format("  surface.height: ", d3dkmt.d3d9.surface.height));
-      } else {
-        Logger::warn(str::format("D3D11Device::ConvertRuntimeDescriptor: Unsupported D3D9 type: ", d3dkmt.d3d9.type));
-        return false;
-      }
 
       desc->Width = d3dkmt.d3d9.dxgi.width;
       desc->Height = d3dkmt.d3d9.dxgi.height;
@@ -2854,29 +2863,30 @@ namespace dxvk {
           desc->Height = d3dkmt.d3d9.surface.height;
           break;
         default:
-          break;
+          Logger::warn(str::format("D3D11Device::ConvertRuntimeDescriptor: Unsupported D3D9 type: ", d3dkmt.d3d9.type));
+          return false;
       }
-
-      Logger::debug(str::format("D3D11Device::ConvertRuntimeDescriptor: Translated D3D9 desc:"));
-      Logger::debug(str::format("  Width: ", desc->Width));
-      Logger::debug(str::format("  Height: ", desc->Height));
-      Logger::debug(str::format("  Depth: ", desc->Depth));
-      Logger::debug(str::format("  MipLevels: ", desc->MipLevels));
-      Logger::debug(str::format("  ArraySize: ", desc->ArraySize));
-      Logger::debug(str::format("  Format: ", desc->Format));
-      Logger::debug(str::format("  SampleDesc.Count: ", desc->SampleDesc.Count));
-      Logger::debug(str::format("  SampleDesc.Quality: ", desc->SampleDesc.Quality));
-      Logger::debug(str::format("  Usage: ", desc->Usage));
-      Logger::debug(str::format("  BindFlags: ", desc->BindFlags));
-      Logger::debug(str::format("  CPUAccessFlags: ", desc->CPUAccessFlags));
-      Logger::debug(str::format("  MiscFlags: ", desc->MiscFlags));
-      Logger::debug(str::format("  TextureLayout: ", desc->TextureLayout));
-      return true;
+    } else {
+      Logger::warn(str::format("D3D11Device::ConvertRuntimeDescriptor: Unsupported runtime desc size: ",
+                               size, "/", d3dkmt.dxgi.size, " version: ", d3dkmt.dxgi.version));
+      return false;
     }
 
-    Logger::warn(str::format("D3D11Device::ConvertRuntimeDescriptor: Unsupported runtime desc size: ",
-                             size, "/", d3dkmt.dxgi.size, " version: ", d3dkmt.dxgi.version));
-    return false;
+    Logger::debug(str::format("D3D11Device::ConvertRuntimeDescriptor: Translated desc:"));
+    Logger::debug(str::format("  Width: ", desc->Width));
+    Logger::debug(str::format("  Height: ", desc->Height));
+    Logger::debug(str::format("  Depth: ", desc->Depth));
+    Logger::debug(str::format("  MipLevels: ", desc->MipLevels));
+    Logger::debug(str::format("  ArraySize: ", desc->ArraySize));
+    Logger::debug(str::format("  Format: ", desc->Format));
+    Logger::debug(str::format("  SampleDesc.Count: ", desc->SampleDesc.Count));
+    Logger::debug(str::format("  SampleDesc.Quality: ", desc->SampleDesc.Quality));
+    Logger::debug(str::format("  Usage: ", desc->Usage));
+    Logger::debug(str::format("  BindFlags: ", desc->BindFlags));
+    Logger::debug(str::format("  CPUAccessFlags: ", desc->CPUAccessFlags));
+    Logger::debug(str::format("  MiscFlags: ", desc->MiscFlags));
+    Logger::debug(str::format("  TextureLayout: ", desc->TextureLayout));
+    return true;
   }
 
 
@@ -3235,13 +3245,7 @@ namespace dxvk {
     if (!Buffer->canRelocate())
       return;
 
-    auto chunk = m_device->AllocCsChunk(DxvkCsChunkFlag::SingleUse);
-
-    chunk->push([cBuffer = Buffer] (DxvkContext* ctx) {
-      ctx->ensureBufferAddress(cBuffer);
-    });
-
-    m_device->GetContext()->InjectCsChunk(DxvkCsQueue::HighPriority, std::move(chunk), true);
+    m_device->LockBuffer(Buffer);
   }
 
 
@@ -3762,6 +3766,30 @@ namespace dxvk {
   
 
 
+  HMODULE D3D11DXGIDevice::initVendorHacks() {
+#ifdef _WIN32
+    if (m_dxvkAdapter->info().vendorId == uint32_t(DxvkGpuVendor::Intel)) {
+      char sysdir[MAX_PATH], path[MAX_PATH];
+      GetSystemDirectoryA(sysdir, sizeof(sysdir));
+      snprintf(path, sizeof(path),
+               "%s\\DriverStore\\FileRepository\\igd_faux.inf_1\\igd10iumd64.dll", sysdir);
+      HMODULE igd10iumd = ::LoadLibraryA(path);
+      if (igd10iumd)
+        Logger::info("Loaded igd10iumd64.dll for Intel driver workarounds");
+      return igd10iumd;
+    }
+#endif
+    return nullptr;
+  }
+
+  void D3D11DXGIDevice::cleanupVendorHacks() {
+#ifdef _WIN32
+    if (m_vendorHacks.igd10iumd64)
+      ::FreeLibrary(m_vendorHacks.igd10iumd64);
+#endif
+  }
+
+
   D3D11DXGIDevice::D3D11DXGIDevice(
           IDXGIAdapter*       pAdapter,
           ID3D12Device*       pD3D12Device,
@@ -3784,12 +3812,12 @@ namespace dxvk {
     m_metaDevice    (this),
     m_dxvkFactory   (this, &m_d3d11Device),
     m_destructionNotifier(this) {
-
+    m_vendorHacks.igd10iumd64 = initVendorHacks();
   }
-  
-  
-  D3D11DXGIDevice::~D3D11DXGIDevice() {
 
+
+  D3D11DXGIDevice::~D3D11DXGIDevice() {
+    cleanupVendorHacks();
   }
   
   

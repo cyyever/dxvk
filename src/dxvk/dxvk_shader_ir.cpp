@@ -600,8 +600,12 @@ namespace dxvk {
 
 
     dxbc_spv::ir::Builder::iterator handleUserInput(dxbc_spv::ir::Builder::iterator op) {
-      if (m_stage == dxbc_spv::ir::ShaderStage::ePixel)
+      if (m_stage == dxbc_spv::ir::ShaderStage::ePixel) {
         handleInputInterpolation(op);
+
+        auto locationMask = 1u << uint32_t(op->getOperand(op->getFirstLiteralOperandIndex()));
+        m_metadata.flatShadingInputs |= m_info.flatShadingInputs & locationMask;
+      }
 
       return ++op;
     }
@@ -628,10 +632,12 @@ namespace dxvk {
           m_metadata.flags.set(DxvkShaderFlag::ExportsPosition);
         } break;
 
-        case dxbc_spv::ir::BuiltIn::eLayerIndex:
+        case dxbc_spv::ir::BuiltIn::eLayerIndex: {
+          m_metadata.flags.set(DxvkShaderFlag::ExportsLayer);
+        } break;
+
         case dxbc_spv::ir::BuiltIn::eViewportIndex: {
-          if (m_stage != dxbc_spv::ir::ShaderStage::eGeometry)
-            m_metadata.flags.set(DxvkShaderFlag::ExportsViewportIndexLayerFromVertexStage);
+          m_metadata.flags.set(DxvkShaderFlag::ExportsViewport);
         } break;
 
         case dxbc_spv::ir::BuiltIn::eSampleMask: {
@@ -2025,9 +2031,12 @@ namespace dxvk {
 
     // Fix up shader I/O based on shader linkage
     { dxbc_spv::ir::LowerIoPass ioPass(irBuilder);
+      if (m_metadata.stage == VK_SHADER_STAGE_FRAGMENT_BIT)
+        ioPass.resolveUnwrittenPsOutputs();
+
       if (linkage) {
-        if (m_metadata.stage == VK_SHADER_STAGE_FRAGMENT_BIT && linkage->fsFlatShading && m_info.flatShadingInputs)
-          ioPass.enableFlatInterpolation(m_info.flatShadingInputs);
+        if (m_metadata.stage == VK_SHADER_STAGE_FRAGMENT_BIT && linkage->fsFlatShading && m_metadata.flatShadingInputs)
+          ioPass.enableFlatInterpolation(m_metadata.flatShadingInputs);
 
         if (m_metadata.stage == VK_SHADER_STAGE_GEOMETRY_BIT && linkage->inputTopology != m_metadata.inputTopology)
           ioPass.changeGsInputPrimitiveType(convertPrimitiveType(linkage->inputTopology));
@@ -2084,10 +2093,11 @@ namespace dxvk {
     options.includeDebugNames = true;
     options.nvRawAccessChains = m_info.options.spirv.test(DxvkShaderSpirvFlag::SupportsNvRawAccessChains);
     options.dualSourceBlending = linkage && linkage->fsDualSrcBlend;
+    options.zeroInitializeScratch = m_info.options.spirv.test(DxvkShaderSpirvFlag::ZeroScratchMemory);
 
     if (m_info.options.spirv.all(DxvkShaderSpirvFlag::IndependentDenormMode,
-                               DxvkShaderSpirvFlag::SupportsRte32,
-                               DxvkShaderSpirvFlag::SupportsDenormFlush32)) {
+                                 DxvkShaderSpirvFlag::SupportsRte32,
+                                 DxvkShaderSpirvFlag::SupportsDenormFlush32)) {
       if (m_info.options.spirv.test(DxvkShaderSpirvFlag::SupportsRte16))
         options.supportedRoundModesF16 |= dxbc_spv::ir::RoundMode::eNearestEven;
       if (m_info.options.spirv.test(DxvkShaderSpirvFlag::SupportsRte32))
@@ -2163,12 +2173,12 @@ namespace dxvk {
 
 
   void DxvkIrShader::convertIr(const char* reason) {
-    if (m_convertedIr.load(std::memory_order_acquire))
+    if (m_convertedIr.load())
       return;
 
     std::lock_guard lock(m_mutex);
 
-    if (m_convertedIr.load(std::memory_order_relaxed))
+    if (m_convertedIr.load())
       return;
 
     if (reason && Logger::logLevel() <= LogLevel::Debug)
@@ -2184,7 +2194,7 @@ namespace dxvk {
     // Destroy original converter, we no longer need it
     m_baseIr = nullptr;
 
-    m_convertedIr.store(true, std::memory_order_release);
+    m_convertedIr.store(true);
 
     // Need to do this *after* marking the conversion as done since lowering
     // to SPIR-V itself will otherwise call into this method again
@@ -2217,6 +2227,7 @@ namespace dxvk {
     options.arithmeticOptions.lowerDot = true;
     options.arithmeticOptions.lowerSinCos = m_info.options.flags.test(DxvkShaderCompileFlag::LowerSinCos);
     options.arithmeticOptions.lowerMsad = true;
+    options.arithmeticOptions.lowerUdiv = true;
     options.arithmeticOptions.lowerF32toF16 = m_info.options.flags.test(DxvkShaderCompileFlag::LowerF32toF16);
     options.arithmeticOptions.lowerConvertFtoI = m_info.options.flags.test(DxvkShaderCompileFlag::LowerFtoI);
     options.arithmeticOptions.lowerGsVertexCountIn = false;
@@ -2250,6 +2261,9 @@ namespace dxvk {
     options.derivativeOptions.hoistDescriptorLoads = true;
 
     options.cseOptions.relocateDescriptorLoad = true;
+    options.cseOptions.resolveOverlappingLoads = true;
+
+    options.bufferIndexing.allowDynamicIndexing = true;
 
     if (m_info.options.spirv.test(DxvkShaderSpirvFlag::SupportsResourceIndexing))
       options.descriptorIndexing.optimizeDescriptorIndexing = true;

@@ -59,10 +59,11 @@ namespace dxvk {
     if (!shader) {
       Logger::warn(str::format("Failed to load cached shader ", name));
 
+      m_lut.clear();
       if (!openWriteOnlyLocked())
         Logger::warn(str::format("Failed to re-initialize shader cache ", name));
 
-      m_status.store(Status::OpenWriteOnly, std::memory_order_release);
+      m_status.store(Status::OpenWriteOnly);
     }
 
     return shader;
@@ -89,7 +90,7 @@ namespace dxvk {
 
 
   bool DxvkShaderCache::ensureStatus(Status status) {
-    auto currentStatus = m_status.load(std::memory_order_acquire);
+    auto currentStatus = m_status.load();
 
     if (currentStatus == Status::Uninitialized)
       currentStatus = initialize();
@@ -100,14 +101,14 @@ namespace dxvk {
 
   DxvkShaderCache::Status DxvkShaderCache::initialize() {
     std::unique_lock lock(m_fileMutex);
-    auto status = m_status.load(std::memory_order_relaxed);
+    auto status = m_status.load();
 
     if (status != Status::Uninitialized)
       return status;
 
     status = tryInitializeLocked();
 
-    m_status.store(status, std::memory_order_release);
+    m_status.store(status);
     return status;
   }
 
@@ -668,11 +669,31 @@ namespace dxvk {
 
 
   Rc<DxvkShaderCache> DxvkShaderCache::getInstance() {
-    std::lock_guard lock(s_instance.mutex);
+    std::unique_lock lock(s_instance.mutex);
 
-    if (!s_instance.instance)
-      s_instance.instance = new DxvkShaderCache();
+    while (s_instance.instance) {
+      auto useCount = s_instance.instance->m_useCount.load();
 
+      while (useCount) {
+        // Try to acquire reference from a non-zero ref count to
+        // ensure the object doesn't get destroyed in the meantime
+        if (s_instance.instance->m_useCount.compare_exchange_strong(useCount, useCount + 1u))
+          return Rc<DxvkShaderCache>::unsafeCreate(s_instance.instance);
+      }
+
+      // If the ref count is zero, don't try to revive the object to avoid
+      // weird data races. Instead, wait for the object to get torn down
+      // and potentially recreated by another thread.
+      // Can't compare the pointers directly since a new cache might get
+      // the exact same pointer.
+      s_instance.cond.wait(lock, [&, cVersion = s_instance.version] {
+        return s_instance.version != cVersion;
+      });
+    }
+
+    s_instance.instance = new DxvkShaderCache();
+    s_instance.version += 1u;
+    s_instance.cond.notify_one();
     return s_instance.instance;
   }
 
@@ -680,15 +701,15 @@ namespace dxvk {
   void DxvkShaderCache::freeInstance() {
     std::lock_guard lock(s_instance.mutex);
 
-    // The ref count can only be incremented from 0 to 1 inside a locked
-    // context, so this check is safe. Don't destroy the object if another
-    // thread has essentially revived it.
-    if (m_useCount.load(std::memory_order_relaxed) || s_instance.instance != this) {
-      if (s_instance.instance == this)
-        s_instance.instance = nullptr;
-
-      delete this;
+    if (s_instance.instance == this) {
+      s_instance.instance = nullptr;
+      s_instance.version += 1u;
+      s_instance.cond.notify_one();
     }
+
+    // Keep lock, we want to ensure all files are unlocked before
+    // any other thread can recreate the shader cache.
+    delete this;
   }
 
 

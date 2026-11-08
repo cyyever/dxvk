@@ -1,7 +1,6 @@
 #pragma once
 
 #include "d3d8_include.h"
-#include "d3d8_multithread.h"
 #include "d3d8_texture.h"
 #include "d3d8_buffer.h"
 #include "d3d8_swapchain.h"
@@ -11,6 +10,8 @@
 #include "d3d8_batch.h"
 
 #include "../d3d9/d3d9_bridge.h"
+
+#include "../util/sync/sync_scoped.h"
 
 #include <array>
 #include <vector>
@@ -23,6 +24,9 @@ namespace dxvk {
   class D3D8Interface;
 
   struct D3D8VertexShaderInfo;
+
+  using D3D8Multithread = sync::ScopedDeviceLock;
+  using D3D8DeviceLock = sync::ScopedDeviceGuard;
 
   using D3D8DeviceBase = D3D8WrappedObject<d3d9::IDirect3DDevice9, IDirect3DDevice8>;
   class D3D8Device final : public D3D8DeviceBase {
@@ -366,7 +370,7 @@ namespace dxvk {
     inline bool ShouldBatch()  { return m_batcher  != nullptr; }
 
     D3D8DeviceLock LockDevice() {
-      return m_multithread.AcquireLock();
+      return m_multithread.acquire();
     }
 
     /**
@@ -427,24 +431,25 @@ namespace dxvk {
         m_validTextures.erase(textureIter);
     }
 
-    friend d3d9::IDirect3DPixelShader9* getPixelShaderPtr(D3D8Device* device, DWORD Handle);
-    friend D3D8VertexShaderInfo*        getVertexShaderInfo(D3D8Device* device, DWORD Handle);
+    friend d3d9::IDirect3DPixelShader9* GetPixelShaderPtr(D3D8Device* device, DWORD Handle);
+    
+    friend D3D8VertexShaderInfo*        GetVertexShaderInfo(D3D8Device* device, DWORD Handle);
 
   private:
 
-    Com<IDxvkD3D8Bridge>  m_bridge;
-    const D3D8Options&    m_d3d8Options;
+    Com<IDxvkLegacyD3DDeviceBridge> m_bridge;
+    const D3D8Options&              m_d3d8Options;
 
-    Com<D3D8Interface>    m_parent;
+    Com<D3D8Interface>              m_parent;
 
-    D3DPRESENT_PARAMETERS m_presentParams;
-    
+    D3DPRESENT_PARAMETERS           m_presentParams;
+
     // Value of D3DRS_LINEPATTERN
-    D3DLINEPATTERN        m_linePattern = { };
+    D3DLINEPATTERN                  m_linePattern = { };
     // Value of D3DRS_ZVISIBLE (although the RS is not supported, its value is stored)
-    DWORD                 m_zVisible    = 0;
+    DWORD                           m_zVisible    = 0;
 
-    bool                  m_shadowPerspectiveDivide = false;
+    bool                            m_shadowPerspectiveDivide = false;
 
     D3D8StateBlock*                           m_recorder = nullptr;
     DWORD                                     m_recorderToken = 0;
@@ -453,8 +458,8 @@ namespace dxvk {
     D3D8Batcher*                              m_batcher  = nullptr;
 
     struct D3D8VBO {
-      Com<D3D8VertexBuffer, false>   buffer = nullptr;
-      UINT                           stride = 0;
+      Com<D3D8VertexBuffer, false>  buffer = nullptr;
+      UINT                          stride = 0;
     };
 
     std::array<Com<D3D8Texture2D, false>, d8caps::MAX_TEXTURE_STAGES> m_textures;
@@ -471,10 +476,12 @@ namespace dxvk {
     Com<D3D8Surface, false>              m_renderTarget;
     Com<D3D8Surface, false>              m_depthStencil;
 
+    // can be a FVF or a programmable VS index (marked by D3DFVF_RESERVED0)
+    DWORD                                         m_currentVertexShader = 0;
     std::vector<D3D8VertexShaderInfo>             m_vertexShaders;
+
+    DWORD                                         m_currentPixelShader  = 0;
     std::vector<Com<d3d9::IDirect3DPixelShader9>> m_pixelShaders;
-    DWORD                                         m_currentVertexShader  = 0; // can be FVF or vs index (marked by D3DFVF_RESERVED0)
-    DWORD                                         m_currentPixelShader   = 0;
 
     D3DDEVTYPE            m_deviceType;
     HWND                  m_window;

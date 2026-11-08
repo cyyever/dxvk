@@ -7,6 +7,7 @@
 #include "dxvk_context.h"
 #include "dxvk_fence.h"
 #include "dxvk_framebuffer.h"
+#include "dxvk_hang.h"
 #include "dxvk_image.h"
 #include "dxvk_instance.h"
 #include "dxvk_latency.h"
@@ -42,7 +43,6 @@ namespace dxvk {
     VkBool32 renderPassClearFormatBug   : 1;
     VkBool32 renderPassResolveFormatBug : 1;
     VkBool32 preferRenderPassOps        : 1;
-    VkBool32 preferPrimaryCmdBufs       : 1;
     VkBool32 preferComputeMipGen        : 1;
     VkBool32 preferDescriptorByteOffsets: 1;
     VkBool32 preferCachedMemory         : 1;
@@ -134,6 +134,14 @@ namespace dxvk {
      */
     DxvkDebugFlags debugFlags() const {
       return m_debugFlags;
+    }
+
+    /**
+     * \brief Retrieves checkpoint buffer for debug purposes
+     * \returns Checkpoint buffer, or \c nullptr.
+     */
+    DxvkCheckpointBuffer* getCheckpointBuffer() {
+      return m_debugFlags.test(DxvkDebugFlag::Hang) ? &m_checkpoints : nullptr;
     }
 
     /**
@@ -283,12 +291,6 @@ namespace dxvk {
      * \returns \c true if all required features are supported.
      */
     bool canUseGraphicsPipelineLibrary() const;
-
-    /**
-     * \brief Checks whether pipeline creation cache control can be used
-     * \returns \c true if all required features are supported.
-     */
-    bool canUsePipelineCacheControl() const;
 
     /**
      * \brief Checks whether sample locations can be used
@@ -648,13 +650,17 @@ namespace dxvk {
      * \param [in] presenter The presenter
      * \param [in] tracker Latency tracker
      * \param [in] frameId Frame ID
-     * \param [out] status Present status
+     * \param [in] rectCount Number of dirty rectangles,
+     * \param [in] rects Dirty rectangles
+     * \param [in] submissionId Submission timeline
      */
     void presentImage(
       const Rc<Presenter>&            presenter,
       const Rc<DxvkLatencyTracker>&   tracker,
             uint64_t                  frameId,
-            DxvkSubmitStatus*         status);
+            uint32_t                  rectCount,
+      const VkRectLayerKHR*           rects,
+            uint64_t                  submissionId);
     
     /**
      * \brief Submits a command list
@@ -664,13 +670,19 @@ namespace dxvk {
      * \param [in] commandList The command list to submit
      * \param [in] tracker Latency tracker
      * \param [in] frameId Frame ID
-     * \param [out] status Submission feedback
+     * \param [in] submissionId Submission timeline
      */
     void submitCommandList(
       const Rc<DxvkCommandList>&      commandList,
       const Rc<DxvkLatencyTracker>&   tracker,
             uint64_t                  frameId,
-            DxvkSubmitStatus*         status);
+            uint64_t                  submissionId);
+
+    /**
+     * \brief Sets queue submission timeout
+     * \param [in] timeout Timeout, in nanoseconds
+     */
+    void setSubmissionTimeout(uint64_t timeout);
 
     /**
      * \brief Locks submission queue
@@ -706,12 +718,10 @@ namespace dxvk {
     }
 
     /**
-     * \brief Waits for a given submission
-     * 
-     * \param [in,out] status Submission status
-     * \returns Result of the submission
+     * \brief Waits for a given submission to be sent to the GPU
+     * \param [in] submission Submission timeline to wait for
      */
-    VkResult waitForSubmission(DxvkSubmitStatus* status);
+    void waitForSubmission(uint64_t submissionId);
 
     /**
      * \brief Waits for a fence to become signaled
@@ -761,11 +771,12 @@ namespace dxvk {
 
     DxvkDevicePerfHints         m_perfHints;
     DxvkObjects                 m_objects;
+    DxvkCheckpointBuffer        m_checkpoints;
 
     sync::Spinlock              m_statLock;
     DxvkStatCounters            m_statCounters;
 
-    DxvkRecycler<DxvkCommandList, 16> m_recycledCommandLists;
+    DxvkRecycler<DxvkCommandList, MaxNumQueuedCommandBuffers> m_recycledCommandLists;
 
     DxvkSubmissionQueue         m_submissionQueue;
 

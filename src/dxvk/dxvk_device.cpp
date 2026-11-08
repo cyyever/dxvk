@@ -24,6 +24,7 @@ namespace dxvk {
     m_properties        (caps.getProperties()),
     m_perfHints         (getPerfHints()),
     m_objects           (this),
+    m_checkpoints       (this),
     m_submissionQueue   (this, queueCallback) {
 
     if (adapter->kmtLocal()) {
@@ -121,16 +122,6 @@ namespace dxvk {
   }
 
 
-  bool DxvkDevice::canUsePipelineCacheControl() const {
-    // Don't bother with this unless the device also supports shader module
-    // identifiers, since decoding and hashing the shaders is slow otherwise
-    // and likely provides no benefit over linking pipeline libraries.
-    return m_features.vk13.pipelineCreationCacheControl
-        && m_features.extShaderModuleIdentifier.shaderModuleIdentifier
-        && m_options.enableGraphicsPipelineLibrary != Tristate::True;
-  }
-
-
   bool DxvkDevice::canUseSampleLocations(VkSampleCountFlags samples) const {
     return (m_features.extSampleLocations)
         && (m_features.extExtendedDynamicState3.extendedDynamicState3SampleLocationsEnable)
@@ -188,12 +179,7 @@ namespace dxvk {
   
   
   Rc<DxvkCommandList> DxvkDevice::createCommandList() {
-    Rc<DxvkCommandList> cmdList = m_recycledCommandLists.retrieveObject();
-    
-    if (cmdList == nullptr)
-      cmdList = new DxvkCommandList(this);
-    
-    return cmdList;
+    return m_recycledCommandLists.retrieveObject(this);
   }
 
 
@@ -614,16 +600,21 @@ namespace dxvk {
     const Rc<Presenter>&            presenter,
     const Rc<DxvkLatencyTracker>&   tracker,
           uint64_t                  frameId,
-          DxvkSubmitStatus*         status) {
+          uint32_t                  rectCount,
+    const VkRectLayerKHR*           rects,
+          uint64_t                  submissionId) {
     DxvkPresentInfo presentInfo = { };
     presentInfo.presenter = presenter;
     presentInfo.frameId = frameId;
+
+    for (uint32_t i = 0u; i < rectCount; i++)
+      presentInfo.rects.push_back(rects[i]);
 
     DxvkLatencyInfo latencyInfo;
     latencyInfo.tracker = tracker;
     latencyInfo.frameId = frameId;
 
-    m_submissionQueue.present(presentInfo, latencyInfo, status);
+    m_submissionQueue.present(presentInfo, latencyInfo, submissionId);
     
     std::lock_guard<sync::Spinlock> statLock(m_statLock);
     m_statCounters.addCtr(DxvkStatCounter::QueuePresentCount, 1);
@@ -634,7 +625,7 @@ namespace dxvk {
     const Rc<DxvkCommandList>&      commandList,
     const Rc<DxvkLatencyTracker>&   tracker,
           uint64_t                  frameId,
-          DxvkSubmitStatus*         status) {
+          uint64_t                  submissionId) {
     DxvkSubmitInfo submitInfo = { };
     submitInfo.cmdList = commandList;
 
@@ -642,22 +633,20 @@ namespace dxvk {
     latencyInfo.tracker = tracker;
     latencyInfo.frameId = frameId;
 
-    m_submissionQueue.submit(submitInfo, latencyInfo, status);
+    m_submissionQueue.submit(submitInfo, latencyInfo, submissionId);
 
     std::lock_guard<sync::Spinlock> statLock(m_statLock);
     m_statCounters.merge(commandList->statCounters());
   }
-  
-  
-  VkResult DxvkDevice::waitForSubmission(DxvkSubmitStatus* status) {
-    VkResult result = status->result.load();
 
-    if (result == VK_NOT_READY) {
-      m_submissionQueue.synchronizeSubmission(status);
-      result = status->result.load();
-    }
 
-    return result;
+  void DxvkDevice::setSubmissionTimeout(uint64_t timeout) {
+    m_submissionQueue.setSubmissionTimeout(timeout);
+  }
+
+  
+  void DxvkDevice::waitForSubmission(uint64_t submissionId) {
+    m_submissionQueue.synchronizeSubmission(submissionId);
   }
 
 
@@ -735,19 +724,12 @@ namespace dxvk {
                   || m_adapter->matchesDriver(VK_DRIVER_ID_MESA_V3DV)
                   || m_adapter->matchesDriver(VK_DRIVER_ID_BROADCOM_PROPRIETARY)
                   || m_adapter->matchesDriver(VK_DRIVER_ID_IMAGINATION_OPEN_SOURCE_MESA)
-                  || m_adapter->matchesDriver(VK_DRIVER_ID_IMAGINATION_PROPRIETARY);
+                  || m_adapter->matchesDriver(VK_DRIVER_ID_IMAGINATION_PROPRIETARY)
+                  || m_adapter->matchesDriver(VK_DRIVER_ID_MESA_KOSMICKRISP);
 
     applyTristate(tilerMode, m_options.tilerMode);
     hints.preferRenderPassOps = tilerMode;
     hints.preferCachedMemory = tilerMode;
-
-    // Honeykrisp does not have native support for secondary command buffers
-    // and would suffer from added CPU overhead, so be less aggressive.
-    // TODO: Enable ANV once mesa issue 12791 is resolved.
-    // RADV has issues on RDNA4 up to version 25.0.1.
-    hints.preferPrimaryCmdBufs = m_adapter->matchesDriver(VK_DRIVER_ID_MESA_HONEYKRISP)
-                              || m_adapter->matchesDriver(VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA)
-                              || m_adapter->matchesDriver(VK_DRIVER_ID_MESA_RADV, Version(), Version(25, 0, 2));
 
     // Compute-based mip generation has some potential for performance
     // regressions or driver issues. Just enable it on Nvidia and RADV
@@ -790,11 +772,14 @@ namespace dxvk {
     if (!(r32Features & VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT))
       m_shaderOptions.flags.set(DxvkShaderCompileFlag::TypedR32LoadRequiresFormat);
 
-    // Intel's hardware sin/cos is so inaccurate that it causes rendering issues in some games
-    bool lowerSinCos = m_adapter->matchesDriver(VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA)
-                    || m_adapter->matchesDriver(VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS);
+    // Up to the Intel Xe2 GPU architecture, the hardware sin/cos precision was low
+    // (but spec compliant) close to zero, which causes rendering issues in some games.
+    // Precision close to 0 is significantly improved with Xe3 (arch 30) and newer.
+    bool lowerSinCos =
+        (m_adapter->matchesDriver(VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA)
+         || m_adapter->matchesDriver(VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS))
+         && (!m_features.intelDeviceInfo || m_properties.intelDeviceInfo.deviceIpVersionArch < 30u);
     applyTristate(lowerSinCos, m_options.lowerSinCos);
-
 
     if (lowerSinCos)
       m_shaderOptions.flags.set(DxvkShaderCompileFlag::LowerSinCos);
@@ -805,6 +790,10 @@ namespace dxvk {
         DxvkShaderCompileFlag::LowerFtoI,
         DxvkShaderCompileFlag::LowerF32toF16);
     }
+
+    // Enable game workarounds
+    if (m_options.zeroShaderScratchMemory)
+      m_shaderOptions.spirv.set(DxvkShaderSpirvFlag::ZeroScratchMemory);
 
     // On AMD, push constant BDA will not be worse than going through a descriptor
     if (m_adapter->matchesDriver(VK_DRIVER_ID_MESA_RADV)

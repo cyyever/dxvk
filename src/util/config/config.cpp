@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <fstream>
 #include <sstream>
@@ -143,6 +144,10 @@ namespace dxvk {
     /* Call of Duty WW2                           */
     { R"(\\s2_sp64_ship\.exe$)", {{
       { "dxgi.hideNvidiaGpu",              "False" },
+    }} },
+    /* Call of Duty Ghosts */
+    { R"(\\iw6sp64_ship\.exe$)", {{
+      { "dxvk.zeroShaderScratchMemory",     "True" },
     }} },
     /* Need for Speed 2015                        */
     { R"(\\NFS16\.exe$)", {{
@@ -497,10 +502,17 @@ namespace dxvk {
      * because the game doesn't manage to respect *
      * pitch for an A8_UNORM image. Resolves are  *
      * not needed because the game dynamically    *
-     * checks sample count in affected shaders.   */
+     * checks sample count in affected shaders.   *
+     * Compute shaders have LDS race conditions.  */
     { R"(\\Pharaoh\.exe$)", {{
       { "d3d11.disableDirectImageMapping",  "True" },
+      { "d3d11.forceComputeLdsBarriers",    "True" },
       { "dxvk.enableImplicitResolves",     "False" },
+      { "dxvk.zeroMappedMemory",            "True" },
+    }} },
+    /* Skyrim Speshul Edition                     */
+    { R"(\\SkyrimSE\.exe$)", {{
+      { "d3d11.cachedDynamicResources",        "a" },
     }} },
 
     /**********************************************/
@@ -532,11 +544,9 @@ namespace dxvk {
       { "d3d9.lenientClear",                "True" },
       { "d3d9.supportDFFormats",           "False" },
     }} },
-    /* Gothic 3 - Rendering such as water broken  *
-     * on non strict float path with dxvk 3.0     */
+    /* Gothic 3                                   */
     { R"(\\Gothic(3|3Final| III Forsaken Gods)\.exe$)", {{
       { "d3d9.supportDFFormats",           "False" },
-      { "d3d9.floatEmulation",            "Strict" },
     }} },
     /* Sonic Adventure 2                          */
     { R"(\\Sonic Adventure 2\\(launcher|sonic2app)\.exe$)", {{
@@ -594,6 +604,10 @@ namespace dxvk {
      * spec-constantly chose the sampler type     *
      * automagically.                             */
       { "d3d9.forceSamplerTypeSpecConstants", "True" },
+    /* The game passes incorrect values when      *
+     * locking a vertex buffer causing it to      *
+     * render "behind" the initial loading screen */
+      { "d3d9.ignoreDefaultBufferLockRange", "True" },
     }} },
     /* Counter Strike: Global Offensive
        Needs NVAPI to avoid a forced AO + Smoke
@@ -948,7 +962,7 @@ namespace dxvk {
      * depth buffer resolves                      */
     { R"(\\Fallout( -)? New Vegas.*\\(FalloutNV)?(Launcher)?\.exe$)", {{
       { "d3d9.floatEmulation",            "Strict" },
-      { "d3d9.hideNvidiaGpu",               "True" },
+      { "d3d9.customVendorId",              "1002" },
     }} },
     /* Dungeons and Dragons: Dragonshard          *
      * Massive FPS decreases in some scenes       */
@@ -1005,10 +1019,6 @@ namespace dxvk {
      * improve perf on all hardware.              */
     { R"(\\(FarCry2|farcry2game)\.exe$)", {{
       { "d3d9.cachedWriteOnlyBuffers",      "True" },
-    }} },
-    /* Dark Sector - Crashes in places            */
-    { R"(\\DS\.exe$)", {{
-      { "d3d9.textureMemory",                  "0" },
     }} },
     /* Arcana Heart 3 Love Max + Xtend version    *
      * Game speed is too fast above 60 fps        */
@@ -1176,6 +1186,11 @@ namespace dxvk {
     { R"(\\(SplinterCell4|SCDA_online)\.exe$)", {{
       { "d3d9.hideAmdGpu",                  "True" },
     }} },
+    /* Splinter Cell: Chaos Theory                *
+     * Passes incorrect values when locking a vertex buffer  */
+    { R"(\\splintercell3\.exe$)", {{
+      { "d3d9.ignoreDefaultBufferLockRange", "True" },
+    }} },
 
     /**********************************************/
     /* D3D8 GAMES                                 */
@@ -1312,11 +1327,11 @@ namespace dxvk {
       { "d3d9.maxFrameRate",                 "-60" },
     }} },
     /* Rayman 3: Hoodlum Havoc                    *
-     * Missing geometry and textures without      *
-     * legacy DISCARD behavior                    */
+     * Fixes missing geometry and textures        *
+     * as well as some broken effects             */
     { R"(\\Rayman3\.exe$)", {{
       { "d3d9.maxFrameRate",                 "-60" },
-      { "d3d8.forceLegacyDiscard",          "True" },
+      { "d3d8.forceLegacyBuffers",          "True" },
     }} },
     /* Tom Clancy's Splinter Cell                 *
      * Fixes shadow buffers, broken physics       *
@@ -1366,10 +1381,9 @@ namespace dxvk {
       { "d3d9.modeCountCompatibility",      "True" },
     }} },
     /* Top Spin (2005)                            *
-     * Missing geometry and textures without      *
-     * legacy DISCARD behavior                    */
+     * Fixes missing geometry and textures        */
     { R"(\\TopSpin\.exe$)", {{
-      { "d3d8.forceLegacyDiscard",          "True" },
+      { "d3d8.forceLegacyBuffers",          "True" },
     }} },
     /* Lego Racers 2 - Hits an incredible amount  *
      * of queue syncs with direct buffer mapping  */
@@ -1394,6 +1408,11 @@ namespace dxvk {
     /* Mafia - Improves poor texture filtering    */
     { R"(\\Mafia\\Game\.exe$)", {{
       { "d3d9.samplerAnisotropy",             "16" },
+    }} },
+    /* Manhunt                                    *
+     * Broken AI behavior above 60 FPS (game bug) */
+    { R"(\\manhunt\.exe$)", {{
+      { "d3d9.maxFrameRate",                 "-60" },
     }} },
 
   };

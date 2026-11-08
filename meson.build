@@ -1,4 +1,4 @@
-project('dxvk', ['c', 'cpp'], version : '3.0.0', meson_version : '>= 0.58', default_options : [ 'cpp_std=c++17', 'b_vscrt=static_from_buildtype', 'warning_level=2' ])
+project('dxvk', ['c', 'cpp'], version : '3.1.1', meson_version : '>= 0.58', default_options : [ 'cpp_std=c++17', 'b_vscrt=static_from_buildtype', 'warning_level=2' ])
 
 pkg = import('pkgconfig')
 cpu_family = target_machine.cpu_family()
@@ -72,6 +72,15 @@ if platform == 'windows'
       # work properly as well as avoiding a memcpy from the Wine loader.
       '-Wl,--file-alignment=4096',
     ]
+
+    # Follow PE standards with 8 character name sections, some software that
+    # inspects our DLLs may otherwise crash. For dwarf2 symbols to work we
+    # need to keep the mingw defaults.
+    if not get_option('debug')
+      link_args += [
+        '-Wl,--disable-long-section-names',
+      ]
+    endif
 
     # Wine's built-in back traces only work with dwarf4 symbols
     if get_option('debug')

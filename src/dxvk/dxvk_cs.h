@@ -511,7 +511,7 @@ namespace dxvk {
    * commands on a DXVK context. 
    */
   class DxvkCsThread {
-
+    static constexpr uint64_t MaxQueuedCsChunks = 256u;
   public:
 
     constexpr static uint64_t SynchronizeAll = ~0ull;
@@ -566,7 +566,7 @@ namespace dxvk {
      * \returns Sequence number of last executed chunk
      */
     uint64_t lastSequenceNumber() const {
-      return m_seqOrdered.load(std::memory_order_acquire);
+      return m_seqOrdered.load();
     }
 
   private:

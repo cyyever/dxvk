@@ -1,7 +1,6 @@
 util_src = files([
   'util_env.cpp',
   'util_string.cpp',
-  'util_fps_limiter.cpp',
   'util_file.cpp',
   'util_flush.cpp',
   'util_gdi.cpp',
@@ -9,6 +8,7 @@ util_src = files([
   'util_matrix.cpp',
   'util_shared_res.cpp',
   'util_sleep.cpp',
+  'util_unmap.cpp',
 
   'thread.cpp',
 
@@ -25,6 +25,7 @@ util_src = files([
   'sha1/sha1_util.cpp',
 
   'sync/sync_recursive.cpp',
+  'sync/sync_scoped.cpp',
 ])
 
 util_lib = static_library('util', util_src,

@@ -38,11 +38,11 @@ namespace dxvk {
     ~DxvkShaderCache();
 
     void incRef() {
-      m_useCount.fetch_add(1u, std::memory_order_acquire);
+      m_useCount.fetch_add(1u);
     }
 
     void decRef() {
-      if (m_useCount.fetch_sub(1u, std::memory_order_release) == 1u)
+      if (m_useCount.fetch_sub(1u) == 1u)
         freeInstance();
     }
 
@@ -81,8 +81,10 @@ namespace dxvk {
   private:
 
     struct Instance {
-      dxvk::mutex       mutex;
-      DxvkShaderCache*  instance = nullptr;
+      dxvk::mutex               mutex;
+      dxvk::condition_variable  cond;
+      uint32_t                  version = 0u;
+      DxvkShaderCache*          instance = nullptr;
     };
 
     static Instance s_instance;

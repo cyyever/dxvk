@@ -113,8 +113,7 @@ namespace dxvk {
   public:
 
     DxvkSwapchainBlitter(
-      const Rc<DxvkDevice>& device,
-      const Rc<hud::Hud>&   hud);
+      const Rc<DxvkDevice>& device);
     ~DxvkSwapchainBlitter();
 
     /**
@@ -124,14 +123,16 @@ namespace dxvk {
      * blits the source image onto the swap chain appropriately.
      * The swap chain image will remain bound for rendering.
      * \param [in] ctx Context objects
+     * \param [in] clearColor Background color
      * \param [in] dstView Swap chain image view
      * \param [in] dstRect Destination rectangle
      * \param [in] srcView Image to present
-     * \param [in] srcColorSpace Image color space
      * \param [in] srcRect Source rectangle to present
      */
     void present(
       const Rc<DxvkCommandList>&ctx,
+      const Rc<hud::Hud>&       hud,
+            VkClearColorValue   clearColor,
       const Rc<DxvkImageView>&  dstView,
             VkRect2D            dstRect,
       const Rc<DxvkImageView>&  srcView,
@@ -210,7 +211,6 @@ namespace dxvk {
     };
 
     Rc<DxvkDevice>      m_device;
-    Rc<hud::Hud>        m_hud;
 
     dxvk::mutex         m_mutex;
     Rc<DxvkBuffer>      m_gammaBuffer;
@@ -250,6 +250,7 @@ namespace dxvk {
 
     void renderHudImage(
       const Rc<DxvkCommandList>&        ctx,
+      const Rc<hud::Hud>&               hud,
             VkExtent3D                  extent);
 
     void createHudImage(

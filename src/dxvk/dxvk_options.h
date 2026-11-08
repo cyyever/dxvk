@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../util/config/config.h"
+#include "../util/util_env.h"
 
 #include "../vulkan/vulkan_loader.h"
 
@@ -78,6 +79,22 @@ namespace dxvk {
     /// Enables implicit resolves that are used to
     /// deal with MSAA-related undefined behaviour.
     bool enableImplicitResolves = true;
+
+    /// Enables NV_raw_access_chains extension on Nvidia
+    bool enableNvRawAccessChains = true;
+
+    /// Enables CUDA interop extensions if available
+    bool enableNvCudaInterop = true;
+
+    /// Enable present timing features
+    bool enablePresentTiming = true;
+
+    /// Enable descriptor update templates
+    bool enableDescriptorUpdateTemplates = env::is32BitHostPlatform();
+
+    /// Whether scratch memory in shaders needs
+    /// zero-initialization to work around game bugs.
+    bool zeroShaderScratchMemory = false;
 
     /// Device name
     std::string deviceFilter;

@@ -10,6 +10,9 @@
 #include <sys/sysctl.h>
 #include <unistd.h>
 #include <limits.h>
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
+#include <limits.h>
 #endif
 
 #include "util_env.h"
@@ -102,6 +105,14 @@ namespace dxvk::env {
     size_t count = readlink("/proc/self/exe", exePath.data(), exePath.size());
 
     return std::string(exePath.begin(), exePath.begin() + count);
+#elif defined(__APPLE__)
+    std::array<char, PATH_MAX> exePath = {};
+    uint32_t size = exePath.size();
+
+    if (_NSGetExecutablePath(exePath.data(), &size) != 0)
+      return "";
+
+    return std::string(exePath.data());
 #elif defined(__FreeBSD__)
     int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, getpid()};
     char exePath[PATH_MAX] = {};
@@ -136,7 +147,11 @@ namespace dxvk::env {
 #else
     std::array<char, 16> posixName = {};
     dxvk::str::strlcpy(posixName.data(), name.c_str(), 16);
+#ifdef __APPLE__
+    ::pthread_setname_np(posixName.data());
+#else
     ::pthread_setname_np(pthread_self(), posixName.data());
+#endif
 #endif
   }
 

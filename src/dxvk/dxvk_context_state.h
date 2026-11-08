@@ -102,6 +102,7 @@ namespace dxvk {
     DirectMultiDraw,
     DescriptorBuffer,
     DescriptorHeap,
+    DescriptorTemplates,
     FeatureCount
   };
 
@@ -162,6 +163,7 @@ namespace dxvk {
     DxvkAttachmentMask  attachmentMask;
     VkOffset2D          renderAreaLo = { };
     VkOffset2D          renderAreaHi = { };
+    VkBool32            renderLayered = VK_FALSE;
   };
 
 

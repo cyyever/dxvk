@@ -117,6 +117,10 @@ namespace dxvk::vk {
     VULKAN_FN(vkGetPhysicalDeviceSparseImageFormatProperties);
     VULKAN_FN(vkGetPhysicalDeviceSparseImageFormatProperties2);
 
+    #ifdef VK_KHR_calibrated_timestamps
+    VULKAN_FN(vkGetPhysicalDeviceCalibrateableTimeDomainsKHR);
+    #endif
+
     #ifdef VK_KHR_get_surface_capabilities2
     VULKAN_FN(vkGetPhysicalDeviceSurfaceCapabilities2KHR);
     VULKAN_FN(vkGetPhysicalDeviceSurfaceFormats2KHR);
@@ -443,6 +447,13 @@ namespace dxvk::vk {
     VULKAN_FN(vkCmdDrawMultiIndexedEXT);
     #endif
 
+    #ifdef VK_EXT_present_timing
+    VULKAN_FN(vkSetSwapchainPresentTimingQueueSizeEXT);
+    VULKAN_FN(vkGetSwapchainTimingPropertiesEXT);
+    VULKAN_FN(vkGetSwapchainTimeDomainPropertiesEXT);
+    VULKAN_FN(vkGetPastPresentationTimingEXT);
+    #endif
+
     #ifdef VK_EXT_sample_locations
     VULKAN_FN(vkCmdSetSampleLocationsEXT);
     #endif
@@ -472,6 +483,10 @@ namespace dxvk::vk {
     VULKAN_FN(vkDestroyCuModuleNVX);
     VULKAN_FN(vkDestroyCuFunctionNVX);
     VULKAN_FN(vkCmdCuLaunchKernelNVX);
+    #endif
+
+    #ifdef VK_KHR_calibrated_timestamps
+    VULKAN_FN(vkGetCalibratedTimestampsKHR);
     #endif
 
     #ifdef VK_KHR_external_memory_win32
@@ -512,6 +527,22 @@ namespace dxvk::vk {
     // Wine additions to actually use this extension.
     VULKAN_FN(wine_vkAcquireKeyedMutex);
     VULKAN_FN(wine_vkReleaseKeyedMutex);
+    #endif
+
+    #ifdef VK_KHR_device_fault
+    VULKAN_FN(vkGetDeviceFaultReportsKHR);
+    VULKAN_FN(vkGetDeviceFaultDebugInfoKHR);
+    #endif
+
+    #ifdef VK_AMD_buffer_marker
+    VULKAN_FN(vkCmdWriteBufferMarkerAMD);
+    VULKAN_FN(vkCmdWriteBufferMarker2AMD);
+    #endif
+
+    #ifdef VK_NV_device_diagnostic_checkpoints
+    VULKAN_FN(vkCmdSetCheckpointNV);
+    VULKAN_FN(vkGetQueueCheckpointDataNV);
+    VULKAN_FN(vkGetQueueCheckpointData2NV);
     #endif
 
     #ifdef VK_NV_low_latency2

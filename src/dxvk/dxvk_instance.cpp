@@ -177,6 +177,8 @@ namespace dxvk {
       m_debugFlags.set(DxvkDebugFlag::Capture, DxvkDebugFlag::Markers);
     else if (debugEnv == "capture" || m_options.enableDebugUtils || capture)
       m_debugFlags.set(DxvkDebugFlag::Capture);
+    else if (debugEnv == "hang")
+      m_debugFlags.set(DxvkDebugFlag::Capture, DxvkDebugFlag::Hang);
 
     if (m_debugFlags.isClear()) {
       // Disable any usage of the extension altogether
@@ -243,7 +245,7 @@ namespace dxvk {
       appInfo.pApplicationName      = appName.c_str();
       appInfo.applicationVersion    = flags.raw();
       appInfo.pEngineName           = "DXVK";
-      appInfo.engineVersion         = VK_MAKE_API_VERSION(0, 3, 0, 0);
+      appInfo.engineVersion         = VK_MAKE_API_VERSION(0, 3, 2, 0);
       appInfo.apiVersion            = DxvkVulkanApiVersion;
 
       VkInstanceCreateInfo info = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
@@ -370,6 +372,7 @@ namespace dxvk {
     return {{
       &extensions.extDebugUtils,
       &extensions.extSurfaceMaintenance1,
+      &extensions.extSwapchainColorSpace,
       &extensions.khrGetSurfaceCapabilities2,
       &extensions.khrSurface,
       &extensions.khrSurfaceMaintenance1,

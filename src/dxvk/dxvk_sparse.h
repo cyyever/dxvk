@@ -432,6 +432,7 @@ namespace dxvk {
     Resident  = 0u, ///< Resource is resident in desired memory type
     Demoted   = 1u, ///< Resource is likely unused and may get evicted
     Evicted   = 2u, ///< Resource got evicted to system memory
+    Promoted  = 3u, ///< Resource is enqueued to be moved to preferred memory
   };
 
 
@@ -479,7 +480,7 @@ namespace dxvk {
      * as well as the use count for the given access.
      */
     force_inline void acquire(DxvkAccess access) {
-      m_useCount.fetch_add(getIncrement(access), std::memory_order_acquire);
+      m_useCount.fetch_add(getIncrement(access));
     }
 
     /**
@@ -490,7 +491,7 @@ namespace dxvk {
      */
     force_inline void release(DxvkAccess access) {
       uint64_t increment = getIncrement(access);
-      uint64_t remaining = m_useCount.fetch_sub(increment, std::memory_order_release);
+      uint64_t remaining = m_useCount.fetch_sub(increment);
 
       if (unlikely(remaining == increment))
         delete this;
@@ -506,7 +507,7 @@ namespace dxvk {
       uint64_t increment = getIncrement(to) - getIncrement(from);
 
       if (increment)
-        m_useCount.fetch_add(increment, std::memory_order_acq_rel);
+        m_useCount.fetch_add(increment);
     }
 
     /**
@@ -520,7 +521,7 @@ namespace dxvk {
      * \returns \c true if the resource is in use
      */
     force_inline bool isInUse(DxvkAccess access) const {
-      return m_useCount.load(std::memory_order_acquire) >= getIncrement(access);
+      return m_useCount.load() >= getIncrement(access);
     }
 
     /**
@@ -534,13 +535,12 @@ namespace dxvk {
      */
     Rc<DxvkPagedResource> tryAcquire() {
       uint64_t increment = getIncrement(DxvkAccess::None);
-      uint64_t refCount = m_useCount.load(std::memory_order_acquire);
+      uint64_t refCount = m_useCount.load();
 
       do {
         if (!refCount)
           return nullptr;
-      } while (!m_useCount.compare_exchange_strong( refCount,
-        refCount + increment, std::memory_order_relaxed));
+      } while (!m_useCount.compare_exchange_strong(refCount, refCount + increment));
 
       return Rc<DxvkPagedResource>::unsafeCreate(this);
     }
@@ -631,10 +631,10 @@ namespace dxvk {
      * \returns \c true if the resource can be evicted
      */
     bool requestEviction() {
-      DxvkResourceResidency status = m_residency.load(std::memory_order_acquire);
+      DxvkResourceResidency status = m_residency.load();
 
-      if (status == DxvkResourceResidency::Resident && m_residency.compare_exchange_strong(
-          status, DxvkResourceResidency::Demoted, std::memory_order_release))
+      if (status == DxvkResourceResidency::Resident
+       && m_residency.compare_exchange_strong(status, DxvkResourceResidency::Demoted))
         return false;
 
       return status == DxvkResourceResidency::Demoted;
@@ -649,17 +649,41 @@ namespace dxvk {
      * video memory.
      */
     void requestResidency() {
-      DxvkResourceResidency status = m_residency.load(std::memory_order_acquire);
+      DxvkResourceResidency status = m_residency.load();
 
       if (likely(status == DxvkResourceResidency::Resident))
         return;
 
-      if (status == DxvkResourceResidency::Demoted && m_residency.compare_exchange_strong(
-          status, DxvkResourceResidency::Resident, std::memory_order_release))
-        return;
+      while (true) {
+        switch (status) {
+          case DxvkResourceResidency::Demoted: {
+            if (m_residency.compare_exchange_strong(status, DxvkResourceResidency::Resident))
+              return;
+          } break;
 
-      if (status == DxvkResourceResidency::Evicted)
-        makeResourceResident();
+          case DxvkResourceResidency::Evicted: {
+            if (m_residency.compare_exchange_strong(status, DxvkResourceResidency::Promoted)) {
+              makeResourceResident();
+              return;
+            }
+          } break;
+
+          default:
+            return;
+        }
+      }
+    }
+
+    /**
+     * \brief Reverts residency status to evicted on relocation failure
+     *
+     * Only has an effect if the current residency status is \c Promoted.
+     */
+    void revertResidency() {
+      DxvkResourceResidency status = m_residency.load();
+
+      if (status == DxvkResourceResidency::Promoted)
+        m_residency.compare_exchange_strong(status, DxvkResourceResidency::Evicted);
     }
 
     /**
@@ -718,7 +742,7 @@ namespace dxvk {
      * \param [in] residency New residency status
      */
     void updateResidencyStatus(DxvkResourceResidency residency) {
-      m_residency.store(residency, std::memory_order_release);
+      m_residency.store(residency);
     }
 
   private:
