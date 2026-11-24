@@ -43,7 +43,9 @@ namespace dxvk::bit {
   template<typename T, typename J>
   T cast(const J& src) {
     static_assert(sizeof(T) == sizeof(J));
-    static_assert(std::is_trivially_copyable<J>::value && std::is_trivial<T>::value);
+    static_assert(std::is_trivially_copyable_v<J>
+               && std::is_trivially_default_constructible_v<T>
+               && std::is_trivially_copyable_v<T>);
 
     T dst;
     std::memcpy(&dst, &src, sizeof(T));

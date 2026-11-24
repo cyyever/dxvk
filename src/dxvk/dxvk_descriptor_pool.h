@@ -97,7 +97,7 @@ namespace dxvk {
     dxvk::mutex m_mutex;
 
     small_vector<DescriptorPool, 64u> m_pools;
-    std::pair<size_t, DescriptorPool> m_pool = { };
+    std::pair<size_t, DescriptorPool> m_pool { };
 
     std::pair<size_t, DescriptorPool> getNextPool();
 
