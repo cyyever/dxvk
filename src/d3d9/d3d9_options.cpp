@@ -46,7 +46,11 @@ namespace dxvk {
                                           config.getOption<int32_t>     ("d3d9.maxFrameRate",                  0));
     this->presentInterval               = config.getOption<int32_t>     ("d3d9.presentInterval",               -1);
     this->shaderModel                   = config.getOption<int32_t>     ("d3d9.shaderModel",                   3u);
-    this->dpiAware                      = config.getOption<bool>        ("d3d9.dpiAware",                      true);
+    // Default to false so legacy DPI-unaware D3D9 games keep their logical window
+    // size on macOS Retina displays (RetinaMode=y, LogPixels=192) instead of being
+    // shrunk to 1/4 area by SetProcessDPIAware(). Still overridable via dxvk.conf
+    // or DXVK_CONFIG="d3d9.dpiAware=True".
+    this->dpiAware                      = config.getOption<bool>        ("d3d9.dpiAware",                      false);
     this->lenientClear                  = config.getOption<bool>        ("d3d9.lenientClear",                  false);
     this->deferSurfaceCreation          = config.getOption<bool>        ("d3d9.deferSurfaceCreation",          false);
     this->samplerAnisotropy             = config.getOption<int32_t>     ("d3d9.samplerAnisotropy",             -1);
